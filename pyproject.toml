@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "faf5-recipe"
-version = "1.0.0"
+version = "1.0.1"
 description = "Reproducible long-CSV extraction from a pinned official FAF5.7.1 ZIP"
 readme = "README.md"
 requires-python = ">=3.12"

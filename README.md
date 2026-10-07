@@ -1,6 +1,6 @@
 # faf5-recipe
 
-`faf5-recipe` is a local, standard-library-only extractor for one immutable official FAF5 release. It verifies the downloaded ZIP against its pinned byte size and SHA-256, streams its single CSV member, applies exact code/year/scenario filters, and writes a deterministic long CSV with a provenance manifest. It does not download data, extract ZIP paths, contact a service, or update to a newer release automatically.
+`faf5-recipe` is a local, standard-library-only extractor for one official FAF5 release. It copies the local ZIP to a private temporary snapshot while hashing, then parses that same snapshot only if its byte size and SHA-256 match the fixed release pin. It streams the CSV member, applies exact code/year/scenario filters, and writes a deterministic long CSV with a provenance manifest. It does not download data, extract ZIP paths, contact a service, or update to a newer release automatically.
 
 ## Supported release and interpretation
 
@@ -73,11 +73,11 @@ Verified against the complete pinned archive on 2026-10-07: this command scans *
 The new output directory contains:
 
 - `faf5_flows.csv`: one row per matching source row/year/scenario with at least one of tons, constant-2017-dollar value, or ton-miles present. Rows retain source order, then release year order; `source_row_number` is a one-based position in the CSV data rows. All domestic and foreign origin/destination, mode, commodity, trade, and distance dimensions are retained as strings.
-- `manifest.json`: release and source identity, selected filters, year/scenario semantics, units/value basis, transformation version, row/fact/no-measure counts, validation limits, and the CSV SHA-256. It contains no local input/output path or run timestamp; the same input and filters produce byte-identical outputs.
+- `manifest.json`: release and source identity, selected filters, year/scenario semantics, units/value basis, transformation version, row/fact/no-measure counts, validation limits, and the CSV SHA-256. Its input SHA-256 identifies the private snapshot that was parsed. It contains no local input/output path or run timestamp; the same input and filters produce byte-identical outputs.
 
 `source_rows` is the number of data rows in the CSV. `matched_rows` and `excluded_rows` describe only the five optional code-dimension filters and sum to `source_rows`; year/scenario filters apply to facts after row matching. `no_measure_cases` counts matched row/year combinations selected by year/scenario whose three exported measures are all empty. The manifest makes explicit that numeric measures for dimension-excluded rows are not checked and that codebook membership and cross-measure semantics are not validated.
 
-The extractor bounds input by the pinned archive/member sizes and a 65,536-character CSV field limit, and streams rows without retaining the national table in memory. Long-form output may be larger than the compressed source. Both output files are staged in a temporary sibling directory and published together by a directory rename. The output path must not already exist and its parent must already exist. Run one writer at a time in a parent directory you control; the existence recheck is not a multi-writer lock and does not promise race-safe concurrent publication.
+The extractor bounds input by the pinned archive/member sizes and a 65,536-character CSV field limit, and streams rows without retaining the national table in memory. Before ZIP parsing, it copies at most the pinned 305,397,783 archive bytes to a private temporary file in the system temp directory while calculating the SHA-256; only that verified snapshot is parsed. This requires up to 305,397,783 bytes of temporary storage and prevents changes to the original path from changing the bytes that are extracted. Long-form output may be larger than the compressed source. Both output files are staged in a temporary sibling directory and published together by a directory rename. The output path must not already exist and its parent must already exist. Run one writer at a time in a parent directory you control; the existence recheck is not a multi-writer lock and does not promise race-safe concurrent publication.
 
 ## Development and shipping
 

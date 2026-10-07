@@ -27,7 +27,7 @@ _CSV_MEMBER_SIZE = 1_179_593_832
 _CSV_MEMBER_COMPRESSED_SIZE = 305_373_689
 _METADATA_MEMBER_SIZE = 28_786
 _METADATA_MEMBER_COMPRESSED_SIZE = 23_860
-_TRANSFORMATION_VERSION = "faf5-recipe.extract/1"
+_TRANSFORMATION_VERSION = "faf5-recipe.extract/2"
 _MAX_CSV_FIELD_CHARS = 65_536
 _HASH_CHUNK_SIZE = 1024 * 1024
 
@@ -249,15 +249,23 @@ def _validate_new_output_dir(output_dir: Path) -> None:
         raise NotADirectoryError(f"output parent directory must already exist: {output_dir.parent}")
 
 
-def _sha256_fileobj(source: BinaryIO) -> str:
+def _copy_and_sha256(source: BinaryIO, snapshot: BinaryIO) -> tuple[int, str]:
     digest = hashlib.sha256()
+    copied_size = 0
     source.seek(0)
     while True:
-        chunk = source.read(_HASH_CHUNK_SIZE)
+        remaining = _PINNED_SIZE_BYTES - copied_size
+        chunk = source.read(min(_HASH_CHUNK_SIZE, remaining + 1))
         if not chunk:
             break
+        if len(chunk) > remaining:
+            raise RecipeError("FAF5 input grew beyond its pinned size while creating snapshot")
+        snapshot.write(chunk)
         digest.update(chunk)
-    return digest.hexdigest()
+        copied_size += len(chunk)
+    snapshot.flush()
+    snapshot.seek(0)
+    return copied_size, digest.hexdigest()
 
 
 def _verify_archive_members(archive: zipfile.ZipFile) -> zipfile.ZipInfo:
@@ -422,11 +430,16 @@ def _manifest(
     input_sha256: str,
     csv_sha256: str,
     filters: Faf5Filters,
+    input_verification: str,
 ) -> dict[str, object]:
     return {
         "release_id": RELEASE_ID,
         "source_url": SOURCE_URL,
-        "input": {"size_bytes": input_size_bytes, "sha256": input_sha256},
+        "input": {
+            "size_bytes": input_size_bytes,
+            "sha256": input_sha256,
+            "verification": input_verification,
+        },
         "transformation_version": _TRANSFORMATION_VERSION,
         "selected_filters": filters.manifest_values(),
         "year_semantics": [
@@ -492,6 +505,7 @@ def _prepare_output(
     input_size_bytes: int,
     input_sha256: str,
     filters: Faf5Filters,
+    input_verification: str,
 ) -> dict[str, object]:
     csv_path = temp_dir / "faf5_flows.csv"
     counts = _write_long_csv(source, csv_path, filters)
@@ -501,6 +515,7 @@ def _prepare_output(
         input_sha256=input_sha256,
         csv_sha256=_sha256_path(csv_path),
         filters=filters,
+        input_verification=input_verification,
     )
     manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
         "utf-8"
@@ -550,6 +565,7 @@ def _extract_stream_to_new_directory(
             input_size_bytes=input_size_bytes,
             input_sha256=input_sha256,
             filters=filters,
+            input_verification="internal stream parser; ZIP authenticity is not checked",
         )
         _commit_output(temp_dir, output_dir)
         published = True
@@ -565,7 +581,7 @@ def extract_archive(
     *,
     filters: Faf5Filters | None = None,
 ) -> dict[str, object]:
-    """Verify the immutable official ZIP, stream its CSV, and atomically publish outputs."""
+    """Snapshot and verify the official ZIP bytes, stream its CSV, and atomically publish outputs."""
     input_path = Path(input_zip)
     output_path = Path(output_dir)
     selected_filters = filters or Faf5Filters()
@@ -581,24 +597,28 @@ def extract_archive(
                 raise RecipeError(
                     f"FAF5 input size mismatch: expected {_PINNED_SIZE_BYTES} bytes, got {file_stat.st_size}"
                 )
-            input_sha256 = _sha256_fileobj(archive_file)
-            if input_sha256 != _PINNED_SHA256:
-                raise RecipeError("FAF5 input SHA-256 does not match the pinned official release")
-            archive_file.seek(0)
-            with zipfile.ZipFile(archive_file, mode="r") as archive:
-                csv_info = _verify_archive_members(archive)
-                temp_dir = _make_temp_dir(output_path)
-                with archive.open(csv_info, mode="r") as member:
-                    with io.TextIOWrapper(member, encoding="utf-8-sig", newline="") as source:
-                        manifest = _prepare_output(
-                            temp_dir,
-                            source,
-                            input_size_bytes=file_stat.st_size,
-                            input_sha256=input_sha256,
-                            filters=selected_filters,
-                        )
-            if _sha256_fileobj(archive_file) != input_sha256:
-                raise RecipeError("FAF5 input bytes changed while the archive was being parsed")
+            with tempfile.TemporaryFile(mode="w+b") as archive_snapshot:
+                snapshot_size, input_sha256 = _copy_and_sha256(archive_file, archive_snapshot)
+                if snapshot_size != _PINNED_SIZE_BYTES:
+                    raise RecipeError(
+                        "FAF5 input size changed while creating snapshot: "
+                        f"expected {_PINNED_SIZE_BYTES} bytes, got {snapshot_size}"
+                    )
+                if input_sha256 != _PINNED_SHA256:
+                    raise RecipeError("FAF5 input SHA-256 does not match the pinned official release")
+                with zipfile.ZipFile(archive_snapshot, mode="r") as archive:
+                    csv_info = _verify_archive_members(archive)
+                    temp_dir = _make_temp_dir(output_path)
+                    with archive.open(csv_info, mode="r") as member:
+                        with io.TextIOWrapper(member, encoding="utf-8-sig", newline="") as source:
+                            manifest = _prepare_output(
+                                temp_dir,
+                                source,
+                                input_size_bytes=snapshot_size,
+                                input_sha256=input_sha256,
+                                filters=selected_filters,
+                                input_verification="the private snapshot hashed against the release pin was parsed",
+                            )
         _commit_output(temp_dir, output_path)
         published = True
         return manifest

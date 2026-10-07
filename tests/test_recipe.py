@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import tempfile
+import zipfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -336,6 +337,84 @@ class Faf5RecipeTests(unittest.TestCase):
                 with self.assertRaises(RecipeError):
                     core.extract_archive(archive_path, invalid_zip_output)
             self.assertFalse(invalid_zip_output.exists())
+
+    def test_archive_snapshot_isolated_from_input_mutation(self) -> None:
+        def archive_with_tons(tons: str) -> bytes:
+            row = self._row()
+            row["tons_2017"] = tons
+            source_text = self._rows_to_text(
+                [
+                    list(EXPECTED_SOURCE_HEADERS),
+                    [row[name] for name in EXPECTED_SOURCE_HEADERS],
+                ]
+            ).encode("utf-8")
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("FAF5.7.1.csv", source_text)
+                archive.writestr("FAF5_metadata.xlsx", b"metadata")
+                archive.comment = b"c" * 60_000
+            return b"P" * 100_000 + buffer.getvalue()
+
+        authenticated_archive = archive_with_tons("1")
+        replacement_archive = archive_with_tons("2")
+        self.assertEqual(len(authenticated_archive), len(replacement_archive))
+        with zipfile.ZipFile(io.BytesIO(authenticated_archive), "r") as archive:
+            csv_info = archive.getinfo("FAF5.7.1.csv")
+            metadata_info = archive.getinfo("FAF5_metadata.xlsx")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            archive_path = parent / "input.zip"
+            archive_path.write_bytes(authenticated_archive)
+            output_dir = parent / "extract"
+            verify_members = core._verify_archive_members
+
+            def mutate_original_path(archive: zipfile.ZipFile) -> zipfile.ZipInfo:
+                archive_path.write_bytes(replacement_archive)
+                return verify_members(archive)
+
+            with (
+                patch.object(core, "_PINNED_SIZE_BYTES", len(authenticated_archive)),
+                patch.object(
+                    core,
+                    "_PINNED_SHA256",
+                    hashlib.sha256(authenticated_archive).hexdigest(),
+                ),
+                patch.object(core, "_CSV_MEMBER_SIZE", csv_info.file_size),
+                patch.object(core, "_CSV_MEMBER_COMPRESSED_SIZE", csv_info.compress_size),
+                patch.object(core, "_METADATA_MEMBER_SIZE", metadata_info.file_size),
+                patch.object(
+                    core,
+                    "_METADATA_MEMBER_COMPRESSED_SIZE",
+                    metadata_info.compress_size,
+                ),
+                patch.object(core, "_verify_archive_members", mutate_original_path),
+            ):
+                manifest = core.extract_archive(
+                    archive_path,
+                    output_dir,
+                    filters=Faf5Filters.from_values(years=["2017"]),
+                )
+
+            with (output_dir / "faf5_flows.csv").open(encoding="utf-8", newline="") as handle:
+                records = list(csv.DictReader(handle))
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["tons_thousand"], "1")
+            self.assertEqual(
+                manifest["input"]["sha256"],
+                hashlib.sha256(authenticated_archive).hexdigest(),
+            )
+            self.assertEqual(
+                manifest["input"]["verification"],
+                "the private snapshot hashed against the release pin was parsed",
+            )
+
+    def test_archive_snapshot_copy_never_exceeds_pinned_size(self) -> None:
+        snapshot = io.BytesIO()
+        with patch.object(core, "_PINNED_SIZE_BYTES", 3):
+            with self.assertRaises(RecipeError):
+                core._copy_and_sha256(io.BytesIO(b"abcd"), snapshot)
+        self.assertEqual(snapshot.getvalue(), b"")
 
     @staticmethod
     def _rows_to_text(rows: list[list[str]]) -> str:
