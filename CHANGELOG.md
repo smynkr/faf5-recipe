@@ -5,3 +5,4 @@
 ### Fixed
 
 - Hash a private, size-bounded temporary snapshot and parse that same snapshot, so concurrent changes to the input path cannot substitute unpinned FAF data after verification.
+- Apply year and scenario selections per fact, preserving valid mixed intersections and treating supported disjoint combinations as empty results.

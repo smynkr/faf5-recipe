@@ -109,9 +109,6 @@ _YEAR_SEMANTICS = {
     2045: ("forecast", "baseline"),
     2050: ("forecast", "baseline"),
 }
-_SCENARIO_BY_YEAR = {
-    str(year): semantics[1] for year, semantics in _YEAR_SEMANTICS.items()
-}
 _SUPPORTED_SCENARIOS = frozenset({"annual_estimate", "baseline"})
 _DECIMAL_TEXT = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
 
@@ -144,17 +141,6 @@ class Faf5Filters:
         object.__setattr__(self, "years", _year_values(self.years))
         object.__setattr__(self, "scenarios", _scenario_values(self.scenarios))
 
-        if self.years and self.scenarios:
-            unmatched_years = sorted(
-                year
-                for year in self.years
-                if _SCENARIO_BY_YEAR[year] not in self.scenarios
-            )
-            if unmatched_years:
-                raise RecipeError(
-                    "selected scenario filters are unavailable for year(s): "
-                    + ", ".join(unmatched_years)
-                )
 
     @classmethod
     def from_values(

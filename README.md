@@ -66,7 +66,7 @@ faf5-recipe extract FAF5.7.1.zip \
   --scenario baseline
 ```
 
-Equivalent module invocation is `python -m faf5_recipe extract ...`. Each filter option is repeatable: repeated codes within one dimension are ORed, while different dimensions are ANDed. Code and year values are compared as exact strings; leading zeros are significant.
+Equivalent module invocation is `python -m faf5_recipe extract ...`. Each filter option is repeatable: repeated codes within one dimension are ORed, while different dimensions are ANDed. Code and year values are compared as exact strings; leading zeros are significant. Year and scenario selections are applied per fact: mixed selections emit only year/scenario pairs present in the pinned release, and supported but disjoint selections produce zero facts rather than a validation error. Unknown years and unsupported scenarios are rejected.
 
 Verified against the complete pinned archive on 2026-10-07: this command scans **2,671,386 source rows**, matches **28 rows**, and emits **56 facts**. Its `faf5_flows.csv` SHA-256 is `297790d4340a8f3b10de8a018f90fa2183c78641db11395e8be8dda30df6b6f3`. All exported dimensions and measure strings were reconciled against a separate source scan; replay produced byte-identical CSV and manifest files. Different filters intentionally produce different outputs.
 
