@@ -141,7 +141,6 @@ class Faf5Filters:
         object.__setattr__(self, "years", _year_values(self.years))
         object.__setattr__(self, "scenarios", _scenario_values(self.scenarios))
 
-
     @classmethod
     def from_values(
         cls,
