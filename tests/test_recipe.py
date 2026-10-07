@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import tempfile
+import zipfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -123,14 +124,20 @@ class Faf5RecipeTests(unittest.TestCase):
         writer.writerows(rows)
         return buffer.getvalue()
 
-    def _run_synthetic_extract(self, source_text: str, output_dir: Path) -> dict[str, object]:
+    def _run_synthetic_extract(
+        self,
+        source_text: str,
+        output_dir: Path,
+        *,
+        filters: Faf5Filters | None = None,
+    ) -> dict[str, object]:
         source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
         return core._extract_stream_to_new_directory(
             io.StringIO(source_text, newline=""),
             output_dir,
             input_size_bytes=len(source_text.encode("utf-8")),
             input_sha256=source_hash,
-            filters=self._filters(),
+            filters=self._filters() if filters is None else filters,
         )
 
     def test_release_schema_and_long_fact_semantics(self) -> None:
@@ -189,6 +196,59 @@ class Faf5RecipeTests(unittest.TestCase):
                 hashlib.sha256(self._source_text().encode("utf-8")).hexdigest(),
             )
 
+    def test_mixed_year_scenario_filters_keep_valid_intersection(self) -> None:
+        filters = Faf5Filters.from_values(
+            origins=["011", "012"],
+            destinations=["014"],
+            commodities=["01"],
+            modes=["01"],
+            trades=["1"],
+            years=["2024", "2030"],
+            scenarios=["baseline"],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "extract"
+            manifest = self._run_synthetic_extract(
+                self._source_text(), output_dir, filters=filters
+            )
+            with (output_dir / "faf5_flows.csv").open(encoding="utf-8", newline="") as handle:
+                facts = list(csv.DictReader(handle))
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["estimate_year"], "2030")
+        self.assertEqual(facts[0]["scenario"], "baseline")
+        self.assertEqual(facts[0]["tons_thousand"], "1.000")
+        self.assertEqual(
+            facts[0]["value_million_usd"], "12345678901234567890.123456789"
+        )
+        self.assertEqual(facts[0]["ton_miles_million"], "2.2500")
+        self.assertEqual(manifest["counts"]["matched_rows"], 2)
+        self.assertEqual(manifest["counts"]["output_facts"], 1)
+
+    def test_supported_disjoint_year_scenario_filters_produce_no_facts(self) -> None:
+        filters = Faf5Filters.from_values(
+            origins=["011", "012"],
+            destinations=["014"],
+            commodities=["01"],
+            modes=["01"],
+            trades=["1"],
+            years=["2024"],
+            scenarios=["baseline"],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "extract"
+            manifest = self._run_synthetic_extract(
+                self._source_text(), output_dir, filters=filters
+            )
+            with (output_dir / "faf5_flows.csv").open(encoding="utf-8", newline="") as handle:
+                facts = list(csv.DictReader(handle))
+        self.assertEqual(facts, [])
+        self.assertEqual(manifest["counts"]["source_rows"], 3)
+        self.assertEqual(manifest["counts"]["matched_rows"], 2)
+        self.assertEqual(manifest["counts"]["excluded_rows"], 1)
+        self.assertEqual(manifest["counts"]["matched_rows_without_output_facts"], 2)
+        self.assertEqual(manifest["counts"]["no_measure_cases"], 0)
+        self.assertEqual(manifest["counts"]["output_facts"], 0)
+
     def test_year_and_scenario_filtering_are_fact_level(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_dir = Path(temporary) / "extract"
@@ -230,15 +290,17 @@ class Faf5RecipeTests(unittest.TestCase):
             self.assertNotIn("input_path", manifest)
             self.assertNotIn("output_path", manifest)
 
-    def test_unavailable_scenario_and_noncanonical_year_are_rejected(self) -> None:
+    def test_unknown_years_and_unsupported_scenarios_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             Faf5Filters.from_values(scenarios=["low"])
+        with self.assertRaises(ValueError):
+            Faf5Filters.from_values(scenarios=["high"])
+        with self.assertRaises(ValueError):
+            Faf5Filters.from_values(years=["2016"])
         with self.assertRaises(ValueError):
             Faf5Filters.from_values(years=["02017"])
         with self.assertRaises(ValueError):
             Faf5Filters.from_values(origins="061")
-        with self.assertRaises(ValueError):
-            Faf5Filters.from_values(years=["2024"], scenarios=["baseline"])
 
     def test_invalid_matched_measure_leaves_no_completed_output_or_temp_directory(self) -> None:
         text = self._source_text()
@@ -336,6 +398,84 @@ class Faf5RecipeTests(unittest.TestCase):
                 with self.assertRaises(RecipeError):
                     core.extract_archive(archive_path, invalid_zip_output)
             self.assertFalse(invalid_zip_output.exists())
+
+    def test_archive_snapshot_isolated_from_input_mutation(self) -> None:
+        def archive_with_tons(tons: str) -> bytes:
+            row = self._row()
+            row["tons_2017"] = tons
+            source_text = self._rows_to_text(
+                [
+                    list(EXPECTED_SOURCE_HEADERS),
+                    [row[name] for name in EXPECTED_SOURCE_HEADERS],
+                ]
+            ).encode("utf-8")
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("FAF5.7.1.csv", source_text)
+                archive.writestr("FAF5_metadata.xlsx", b"metadata")
+                archive.comment = b"c" * 60_000
+            return b"P" * 100_000 + buffer.getvalue()
+
+        authenticated_archive = archive_with_tons("1")
+        replacement_archive = archive_with_tons("2")
+        self.assertEqual(len(authenticated_archive), len(replacement_archive))
+        with zipfile.ZipFile(io.BytesIO(authenticated_archive), "r") as archive:
+            csv_info = archive.getinfo("FAF5.7.1.csv")
+            metadata_info = archive.getinfo("FAF5_metadata.xlsx")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            archive_path = parent / "input.zip"
+            archive_path.write_bytes(authenticated_archive)
+            output_dir = parent / "extract"
+            verify_members = core._verify_archive_members
+
+            def mutate_original_path(archive: zipfile.ZipFile) -> zipfile.ZipInfo:
+                archive_path.write_bytes(replacement_archive)
+                return verify_members(archive)
+
+            with (
+                patch.object(core, "_PINNED_SIZE_BYTES", len(authenticated_archive)),
+                patch.object(
+                    core,
+                    "_PINNED_SHA256",
+                    hashlib.sha256(authenticated_archive).hexdigest(),
+                ),
+                patch.object(core, "_CSV_MEMBER_SIZE", csv_info.file_size),
+                patch.object(core, "_CSV_MEMBER_COMPRESSED_SIZE", csv_info.compress_size),
+                patch.object(core, "_METADATA_MEMBER_SIZE", metadata_info.file_size),
+                patch.object(
+                    core,
+                    "_METADATA_MEMBER_COMPRESSED_SIZE",
+                    metadata_info.compress_size,
+                ),
+                patch.object(core, "_verify_archive_members", mutate_original_path),
+            ):
+                manifest = core.extract_archive(
+                    archive_path,
+                    output_dir,
+                    filters=Faf5Filters.from_values(years=["2017"]),
+                )
+
+            with (output_dir / "faf5_flows.csv").open(encoding="utf-8", newline="") as handle:
+                records = list(csv.DictReader(handle))
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["tons_thousand"], "1")
+            self.assertEqual(
+                manifest["input"]["sha256"],
+                hashlib.sha256(authenticated_archive).hexdigest(),
+            )
+            self.assertEqual(
+                manifest["input"]["verification"],
+                "the private snapshot hashed against the release pin was parsed",
+            )
+
+    def test_archive_snapshot_copy_never_exceeds_pinned_size(self) -> None:
+        snapshot = io.BytesIO()
+        with patch.object(core, "_PINNED_SIZE_BYTES", 3):
+            with self.assertRaises(RecipeError):
+                core._copy_and_sha256(io.BytesIO(b"abcd"), snapshot)
+        self.assertEqual(snapshot.getvalue(), b"")
 
     @staticmethod
     def _rows_to_text(rows: list[list[str]]) -> str:
