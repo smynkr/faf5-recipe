@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faf5-recipe"
+version = "1.0.0"
+description = "Reproducible long-CSV extraction from a pinned official FAF5.7.1 ZIP"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "faf5-recipe contributors" }]
+dependencies = []
+
+[project.scripts]
+faf5-recipe = "faf5_recipe.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
